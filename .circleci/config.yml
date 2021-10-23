@@ -1,0 +1,100 @@
+version: 2.1
+
+orbs:
+  node: circleci/node@4.7.0
+  aws-s3: circleci/aws-s3@3.0.0
+  aws-cli: circleci/aws-cli@2.0.3
+
+defaultExecutor: &defaultExecutor
+  name: node/default
+  tag: '14.15'
+
+defaultDeploy: &defaultDeploy
+  parameters:
+    bucket:
+      type: string
+    distribution:
+      type: string
+    build_path:
+      type: string
+      default: 'dist'
+  docker:
+    - image: 'cimg/python:3.10.0'
+  steps:
+    - attach_workspace:
+        at: .
+    - aws-s3/sync: # upload built files to s3
+        from: << parameters.build_path >>/
+        to: s3://<< parameters.bucket >>/
+        aws-region: AWS_REGION
+        aws-access-key-id: AWS_ACCESS_KEY_ID
+        aws-secret-access-key: AWS_SECRET_ACCESS_KEY
+        arguments: |
+          --acl public-read \
+          --cache-control "max-age=0, public, immutable"
+    - run: # invalidate cloudfront cache
+        command: |
+          echo "Invalidate CloudFront Cache:"
+          aws cloudfront create-invalidation --distribution-id << parameters.distribution >> --paths "/*"
+
+jobs:
+  install:
+    executor:
+      <<: *defaultExecutor
+    steps:
+      - checkout
+      - node/install-packages:
+          pkg-manager: yarn
+      - persist_to_workspace:
+          root: .
+          paths:
+            - .
+  build:
+    executor:
+      <<: *defaultExecutor
+    steps:
+      - attach_workspace:
+          at: ./
+      - run:
+          name: Build
+          command: yarn build
+      - persist_to_workspace:
+          root: .
+          paths:
+            - dist/
+  deployStage:
+    <<: *defaultDeploy
+  deployProd:
+    <<: *defaultDeploy
+
+workflows:
+  deploy:
+    jobs:
+      - install
+      - build:
+          context:
+            - fstack-front-end-deploy
+          requires:
+            - install
+          filters:
+            branches:
+              only:
+                - master
+      - deployStage:
+          context:
+            - fstack-front-end-deploy
+          requires:
+            - build
+          bucket: 'fstack-staging'
+          distribution: 'E1W55HFDGVHXJ'
+      - approveProd:
+          type: approval
+          requires:
+            - deployStage
+      - deployProd:
+          context:
+            - fstack-front-end-deploy
+          requires:
+            - approveProd
+          bucket: 'fstack'
+          distribution: 'EWU63IX496I27'
